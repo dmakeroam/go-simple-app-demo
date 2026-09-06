@@ -1,0 +1,80 @@
+name: CD
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  id-token: write   # required for OIDC token
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: go-simple-app
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.tag }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          build-args: VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  update-gitops:
+    needs: build-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout gitops-golang
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/gitops-golang
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Update image tag in values
+        run: |
+          IMAGE_TAG="${{ needs.build-push.outputs.image-tag }}"
+          # Extract registry/repo and tag separately
+          REPO="${IMAGE_TAG%:*}"
+          TAG="${IMAGE_TAG##*:}"
+          sed -i "s|repository:.*|repository: \"${REPO}\"|" chart/values.yaml
+          sed -i "s|tag:.*|tag: \"${TAG}\"|" chart/values.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add chart/values.yaml
+          git commit -m "chore: update go-simple-app image to ${{ github.sha }}"
+          git push
