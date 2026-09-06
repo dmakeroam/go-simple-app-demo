@@ -29,7 +29,7 @@ type rootResponse struct {
 func newServer() (*server, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
-		return nil, fmt.Errorf("get hostname: %w", err)
+		return nil, fmt.Errorf("get hostname 2: %w", err)
 	}
 	return &server{hostname: hostname}, nil
 }
