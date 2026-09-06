@@ -5,6 +5,14 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  workflow_call:
+    outputs:
+      image-tag:
+        value: ${{ jobs.build.outputs.image-tag }}
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   test:
@@ -19,3 +27,55 @@ jobs:
 
       - name: Run tests
         run: go test ./... -v
+
+  build:
+    name: Build and push image
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_call'
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: meta
+        run: |
+          REGISTRY=${{ steps.ecr.outputs.registry }}
+          TAGS="${REGISTRY}/go-simple-app:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${REGISTRY}/go-simple-app:latest"
+          fi
+          echo "tag=${REGISTRY}/go-simple-app:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/go-simple-app@${{ steps.push.outputs.digest }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
